@@ -758,7 +758,8 @@ function SessionTab({ store, update }) {
             <button onClick={() => {
               const s = store.sessions.slice(-1)[0];
               if (!s) return;
-              const txt = `📊 Session Report — ${new Date(s.date).toLocaleDateString('de-DE')}\n${LIFT_NAMES[s.lift]}: ${s.computed.status} day\nPrescribed: ${s.prescription.sets}×${s.prescription.reps}@RPE ${s.prescription.targetRpe}\nWeight: ${s.workingSets[0]?.weight}kg (suggested: ${roundTo(activeE1rm*tablePct*modifier)}kg)\nActual RPE: ${s.workingSets[0]?.rpe}\ne1RM: ${roundTo(s.computed.e1rm)}kg\nReadiness: ${s.computed.status} (vel ${(velPctDev>=0?'+':'')+velPctDev.toFixed(1)}%) | Volume: ${s.computed.volumeRec}`;
+              const setsStr = s.workingSets.map((ws, i) => `  Set ${i+1}: ${ws.weight}kg × ${ws.reps} @RPE ${ws.rpe} (e1RM: ${roundTo(calcE1RM(ws.weight, ws.reps, ws.rpe))}kg)`).join('\n');
+              const txt = `📊 Session Report — ${new Date(s.date).toLocaleDateString('de-DE')}\n${LIFT_NAMES[s.lift]}: ${s.computed.status} day\nPrescribed: ${s.prescription.sets}×${s.prescription.reps} @RPE ${s.prescription.targetRpe}\n\nWorking Sets:\n${setsStr}\n\nBest e1RM: ${roundTo(s.computed.e1rm)}kg\nReadiness: ${s.computed.status} | Volume: ${s.computed.volumeRec}`;
               navigator.clipboard?.writeText(txt).then(() => alert('Copied to clipboard!')).catch(() => {});
             }} style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: `1px solid ${C.blue}40`, background: C.blueBg, color: C.blue, fontFamily: fontMono, fontSize: 11, cursor: 'pointer' }}>📋 Copy for Coach</button>
           </div>
