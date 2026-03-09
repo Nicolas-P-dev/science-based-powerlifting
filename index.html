@@ -14,8 +14,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    html,body,#root{height:100%}
-    body{background:#08090c;color:#e4e4e7;font-family:'IBM Plex Sans','Helvetica Neue',sans-serif;-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+    html,body,#root{height:100%;overflow-x:hidden}
+    body{background:#08090c;color:#e4e4e7;font-family:'IBM Plex Sans','Helvetica Neue',sans-serif;-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent;overscroll-behavior:none;overflow-x:hidden}
     input[type=number]{-moz-appearance:textfield}
     input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
     input[type=range]{-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer}
@@ -188,14 +188,14 @@ function BigNum({ value, unit, color = C.text }) {
 
 function NumInput({ label, value, onChange, unit='kg', step=2.5, min=0, max=999 }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
       {label && <Label>{label}</Label>}
-      <div style={{ display: 'flex', alignItems: 'center', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden', background: C.surfaceAlt }}>
-        <button onClick={() => onChange(Math.max(min, (value||0)-step))} style={{ width: 40, height: 44, background: 'none', border: 'none', color: C.blue, fontFamily: fontMono, fontSize: 18, cursor: 'pointer' }}>−</button>
+      <div style={{ display: 'flex', alignItems: 'center', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden', background: C.surfaceAlt, minWidth: 0 }}>
+        <button onClick={() => onChange(Math.max(min, (value||0)-step))} style={{ width: 36, minWidth: 36, height: 44, background: 'none', border: 'none', color: C.blue, fontFamily: fontMono, fontSize: 18, cursor: 'pointer', padding: 0 }}>−</button>
         <input type="number" inputMode="decimal" value={value||''} onChange={e => { const v = parseFloat(e.target.value); onChange(isNaN(v)?0:Math.min(max,Math.max(min,v))); }}
-          style={{ flex: 1, textAlign: 'center', background: 'none', border: 'none', color: C.text, fontFamily: fontMono, fontSize: 16, fontWeight: 700, outline: 'none', height: 44, minWidth: 0 }} />
-        <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono, paddingRight: 6 }}>{unit}</span>
-        <button onClick={() => onChange(Math.min(max, (value||0)+step))} style={{ width: 40, height: 44, background: 'none', border: 'none', color: C.blue, fontFamily: fontMono, fontSize: 18, cursor: 'pointer' }}>+</button>
+          style={{ flex: 1, textAlign: 'center', background: 'none', border: 'none', color: C.text, fontFamily: fontMono, fontSize: 16, fontWeight: 700, outline: 'none', height: 44, minWidth: 0, width: '100%', padding: 0 }} />
+        <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono, paddingRight: 4, whiteSpace: 'nowrap' }}>{unit}</span>
+        <button onClick={() => onChange(Math.min(max, (value||0)+step))} style={{ width: 36, minWidth: 36, height: 44, background: 'none', border: 'none', color: C.blue, fontFamily: fontMono, fontSize: 18, cursor: 'pointer', padding: 0 }}>+</button>
       </div>
     </div>
   );
@@ -607,7 +607,7 @@ function SessionTab({ store, update }) {
       {step === 4 && (
         <Card>
           <Label>Step 4 — Coach's Prescription</Label>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10, overflow: 'hidden' }}>
             <NumInput label="Sets" value={prescSets} onChange={setPrescSets} unit="sets" step={1} min={1} max={10} />
             <NumInput label="Reps" value={prescReps} onChange={setPrescReps} unit="reps" step={1} min={1} max={12} />
           </div>
