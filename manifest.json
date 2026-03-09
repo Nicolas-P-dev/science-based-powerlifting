@@ -2,7 +2,7 @@
   "name": "DailyMax v2 — Evidence-Based Autoregulation",
   "short_name": "DailyMax",
   "description": "Readiness-based autoregulation for RPE-prescribed powerlifting",
-  "start_url": "./"
+  "start_url": "/science-based-powerlifting/"
   "display": "standalone",
   "background_color": "#08090c",
   "theme_color": "#3b82f6",
