@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no,viewport-fit=cover"/>
+  <meta name="theme-color" content="#08090c"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="DailyMax"/>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="icon" href="icon-192.png"/>
+  <link rel="apple-touch-icon" href="icon-192.png"/>
+  <title>DailyMax v2 — Evidence-Based Autoregulation</title>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html,body,#root{height:100%}
+    body{background:#08090c;color:#e4e4e7;font-family:'IBM Plex Sans','Helvetica Neue',sans-serif;-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+    input[type=number]{-moz-appearance:textfield}
+    input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+    input[type=range]{-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer}
+    input[type=range]::-webkit-slider-track{height:5px;border-radius:3px;background:#1e2330}
+    input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:#e4e4e7;border:2px solid #08090c;margin-top:-8px}
+    textarea{font-family:'IBM Plex Mono',monospace}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script type="text/babel">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALGORITHM LAYER — Every formula sourced from research (see algorithm-spec.md)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// §1: RPE → RIR mapping (Zourdos et al. 2016, Tuchscherer RTS)
+const RPE_TO_RIR = {10:0,9.5:0.5,9:1,8.5:1.5,8:2,7.5:2.5,7:3,6.5:3.5,6:4,5.5:4.5,5:5};
+
+// §1: Blended Epley-Brzycki e1RM (DiStasio 2014, Gemini §4.1)
+function calcE1RM(weight, reps, rpe = 10) {
+  if (!weight || weight <= 0 || !reps || reps <= 0) return 0;
+  const rir = RPE_TO_RIR[rpe] ?? 0;
+  const effectiveReps = reps + rir;
+  if (effectiveReps <= 0) return weight;
+  const epley = weight * (1 + 0.0333 * effectiveReps);
+  const brz = effectiveReps >= 36 ? epley : weight / (1.0278 - 0.0278 * effectiveReps);
+  return (epley + brz) / 2;
+}
+
+// §6: Tuchscherer RPE-Percentage Table (RTS, Gemini §4.2)
+const RPE_TABLE = {
+  1:{10:1.000,9.5:0.978,9:0.960,8.5:0.945,8:0.930,7.5:0.920,7:0.910,6.5:0.895,6:0.880},
+  2:{10:0.978,9.5:0.955,9:0.935,8.5:0.920,8:0.905,7.5:0.895,7:0.885,6.5:0.870,6:0.855},
+  3:{10:0.955,9.5:0.930,9:0.910,8.5:0.895,8:0.880,7.5:0.870,7:0.860,6.5:0.845,6:0.830},
+  4:{10:0.930,9.5:0.905,9:0.885,8.5:0.870,8:0.855,7.5:0.845,7:0.835,6.5:0.820,6:0.808},
+  5:{10:0.905,9.5:0.880,9:0.860,8.5:0.845,8:0.830,7.5:0.820,7:0.810,6.5:0.798,6:0.785},
+  6:{10:0.880,9.5:0.855,9:0.835,8.5:0.820,8:0.808,7.5:0.798,7:0.788,6.5:0.775,6:0.763},
+  7:{10:0.855,9.5:0.830,9:0.810,8.5:0.798,8:0.785,7.5:0.775,7:0.765,6.5:0.753,6:0.740},
+  8:{10:0.830,9.5:0.808,9:0.788,8.5:0.775,8:0.765,7.5:0.755,7:0.745,6.5:0.733,6:0.720},
+};
+
+function getRpeTablePct(reps, rpe) {
+  const r = Math.min(8, Math.max(1, Math.round(reps)));
+  const validRpes = [6,6.5,7,7.5,8,8.5,9,9.5,10];
+  const closest = validRpes.reduce((a,b) => Math.abs(b-rpe) < Math.abs(a-rpe) ? b : a);
+  return RPE_TABLE[r]?.[closest] ?? 0.85;
+}
+
+// §5: Readiness modifier — continuous, dampened (Gemini §2.1, §9.1)
+function calcReadinessModifier(velocityPctDev, lift = 'squat') {
+  const sensitivity = lift === 'deadlift' ? 1.25 : 1.0; // Gemini §2.3
+  const adjusted = velocityPctDev * sensitivity;
+  const clamped = Math.max(-15, Math.min(8, adjusted));
+  return 1.0 + (clamped / 100) * 0.5; // 0.5× dampening per §5
+}
+
+// §4: Traffic light status (Gemini §9.1 table)
+function getTrafficLight(velocityPctDev, lift = 'squat') {
+  const threshold = lift === 'deadlift' ? { red: -4, crit: -10 } : { red: -5, crit: -10 };
+  if (velocityPctDev > 3) return 'GREEN';
+  if (velocityPctDev >= threshold.red) return 'AMBER';
+  if (velocityPctDev >= threshold.crit) return 'RED';
+  return 'CRITICAL';
+}
+
+// §3: Volume recommendation from subjective Z-score (Gemini §6.2)
+function getVolumeRec(subZscore) {
+  if (subZscore > -0.5) return { label: 'FULL VOLUME', detail: 'Execute all prescribed sets + accessories', color: '#22c55e' };
+  if (subZscore > -1.5) return { label: 'CAPPED', detail: 'Do working sets, reduce accessories 50%', color: '#eab308' };
+  return { label: 'REDUCED', detail: 'Cap at RPE 7, cut accessories', color: '#ef4444' };
+}
+
+// §2-3: Z-score and rolling stats
+function rollingStats(values, window) {
+  const recent = values.slice(-window);
+  if (recent.length < 2) return { avg: recent[0] || 0, std: 0, n: recent.length };
+  const avg = recent.reduce((a,b) => a+b, 0) / recent.length;
+  const variance = recent.reduce((a,b) => a + (b - avg) ** 2, 0) / (recent.length - 1);
+  return { avg, std: Math.sqrt(variance), n: recent.length };
+}
+
+function zScore(value, avg, std) {
+  if (!std || std === 0) return 0;
+  return (value - avg) / std;
+}
+
+function roundTo(v, n = 2.5) { return Math.round(v / n) * n; }
+
+// §7: Default MVTs (Gemini §5.2, Helms et al. 2017)
+const DEFAULT_MVTS = { squat: 0.31, bench: 0.16, deadlift: 0.15 };
+const LIFT_NAMES = { squat: 'Squat', bench: 'Bench', deadlift: 'Deadlift' };
+const LIFTS = ['squat', 'bench', 'deadlift'];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STORAGE — persistent via window.storage API
+// ═══════════════════════════════════════════════════════════════════════════
+
+const STORE_KEY = 'dailymax-v2';
+
+async function loadStore() {
+  try {
+    const r = localStorage.getItem(STORE_KEY);
+    return r ? JSON.parse(r) : null;
+  } catch { return null; }
+}
+
+async function saveStore(data) {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); } catch(e) { console.error('Save failed', e); }
+}
+
+const EMPTY_STORE = {
+  config: {
+    trainingMaxes: { squat: 0, bench: 0, deadlift: 0 },
+    baselineE1RMs: { squat: 0, bench: 0, deadlift: 0 },
+    mvts: { ...DEFAULT_MVTS },
+    typicalHour: 17,
+  },
+  sessions: [],   // {date, time, lift, subjective:{sleep,fatigue,stress}, calibration:{load,velocity,reps}, prescription:{sets,reps,targetRpe}, workingSets:[{weight,reps,rpe}], computed:{e1rm,velZscore,subZscore,status,modifier,volumeRec}}
+  velocityLog: [], // {date, lift, load, velocity} — for rolling averages
+  subjectiveLog: [], // {date, sum} — for rolling averages
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DESIGN SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+const C = {
+  bg: '#08090c', surface: '#111318', surfaceAlt: '#181c24',
+  border: '#1e2330', borderFocus: '#3b82f6',
+  text: '#e4e4e7', textDim: '#6b7280', textMuted: '#3d4452',
+  green: '#22c55e', greenBg: '#22c55e18',
+  amber: '#eab308', amberBg: '#eab30818',
+  red: '#ef4444', redBg: '#ef444418',
+  blue: '#3b82f6', blueBg: '#3b82f618',
+  critical: '#dc2626',
+};
+
+const STATUS_COLORS = {
+  GREEN: C.green, AMBER: C.amber, RED: C.red, CRITICAL: C.critical,
+};
+
+const fontMono = "'IBM Plex Mono', 'JetBrains Mono', monospace";
+const fontDisplay = "'Archivo Black', 'Oswald', sans-serif";
+const fontBody = "'IBM Plex Sans', 'Helvetica Neue', sans-serif";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED UI COMPONENTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function Card({ children, style }) {
+  return <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, ...style }}>{children}</div>;
+}
+
+function Label({ children }) {
+  return <span style={{ fontSize: 10, fontFamily: fontMono, color: C.textDim, letterSpacing: 1.8, textTransform: 'uppercase' }}>{children}</span>;
+}
+
+function BigNum({ value, unit, color = C.text }) {
+  return (
+    <span style={{ fontFamily: fontDisplay, fontSize: 36, fontWeight: 900, color, lineHeight: 1 }}>
+      {value}<span style={{ fontSize: 14, fontFamily: fontBody, color: C.textDim, marginLeft: 4 }}>{unit}</span>
+    </span>
+  );
+}
+
+function NumInput({ label, value, onChange, unit='kg', step=2.5, min=0, max=999 }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {label && <Label>{label}</Label>}
+      <div style={{ display: 'flex', alignItems: 'center', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden', background: C.surfaceAlt }}>
+        <button onClick={() => onChange(Math.max(min, (value||0)-step))} style={{ width: 40, height: 44, background: 'none', border: 'none', color: C.blue, fontFamily: fontMono, fontSize: 18, cursor: 'pointer' }}>−</button>
+        <input type="number" inputMode="decimal" value={value||''} onChange={e => { const v = parseFloat(e.target.value); onChange(isNaN(v)?0:Math.min(max,Math.max(min,v))); }}
+          style={{ flex: 1, textAlign: 'center', background: 'none', border: 'none', color: C.text, fontFamily: fontMono, fontSize: 16, fontWeight: 700, outline: 'none', height: 44, minWidth: 0 }} />
+        <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono, paddingRight: 6 }}>{unit}</span>
+        <button onClick={() => onChange(Math.min(max, (value||0)+step))} style={{ width: 40, height: 44, background: 'none', border: 'none', color: C.blue, fontFamily: fontMono, fontSize: 18, cursor: 'pointer' }}>+</button>
+      </div>
+    </div>
+  );
+}
+
+function RpeSelect({ value, onChange }) {
+  return (
+    <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+      {[6,6.5,7,7.5,8,8.5,9,9.5,10].map(r => (
+        <button key={r} onClick={() => onChange(r)} style={{
+          padding: '7px 0', borderRadius: 6, flex: 1, minWidth: 34, textAlign: 'center',
+          border: `1px solid ${value===r?C.blue:C.border}`, background: value===r?C.blueBg:C.surfaceAlt,
+          color: value===r?C.blue:C.textDim, fontFamily: fontMono, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+        }}>{r}</button>
+      ))}
+    </div>
+  );
+}
+
+function SubjectiveSlider({ label, value, onChange, anchors }) {
+  const color = value <= 2 ? C.red : value <= 3 ? C.amber : C.green;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Label>{label}</Label>
+        <span style={{ fontFamily: fontDisplay, fontSize: 22, color }}>{value}</span>
+      </div>
+      <input type="range" min={1} max={5} step={1} value={value} onChange={e => onChange(+e.target.value)}
+        style={{ width: '100%', accentColor: color }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+        {anchors.map((a,i) => <span key={i} style={{ fontSize: 8, color: C.textMuted, fontFamily: fontMono }}>{a}</span>)}
+      </div>
+    </div>
+  );
+}
+
+function StatusBadge({ status, size = 'large' }) {
+  const col = STATUS_COLORS[status] || C.textDim;
+  const sz = size === 'large';
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6, padding: sz?'8px 16px':'4px 10px',
+      borderRadius: 8, border: `1.5px solid ${col}`, background: col+'18',
+      fontFamily: fontMono, fontSize: sz?13:10, fontWeight: 700, color: col, letterSpacing: 1.5,
+    }}>
+      <span style={{ width: sz?10:7, height: sz?10:7, borderRadius: '50%', background: col }}/>
+      {status}
+    </span>
+  );
+}
+
+function Spark({ data, width = 240, height = 40, color = C.blue }) {
+  if (!data || data.length < 2) return null;
+  const min = Math.min(...data)*0.98, max = Math.max(...data)*1.02, range = max-min||1;
+  const pts = data.map((v,i) => `${6+(i/(data.length-1))*(width-12)},${3+(height-6)-(((v-min)/range)*(height-6))}`).join(' ');
+  return (
+    <svg width={width} height={height} style={{ display: 'block', width: '100%' }} viewBox={`0 0 ${width} ${height}`}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+      {data.map((v,i) => {
+        const x = 6+(i/(data.length-1))*(width-12), y = 3+(height-6)-(((v-min)/range)*(height-6));
+        return <circle key={i} cx={x} cy={y} r={i===data.length-1?3.5:1.5} fill={i===data.length-1?color:C.textMuted} />;
+      })}
+    </svg>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════════════════
+
+const TABS = ['session', 'setup', 'history', 'data'];
+
+function App() {
+  const [store, setStore] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState('session');
+
+  // Load on mount
+  useEffect(() => {
+    (async () => {
+      const d = await loadStore();
+      setStore(d || JSON.parse(JSON.stringify(EMPTY_STORE)));
+      setLoading(false);
+    })();
+  }, []);
+
+  // Save on change
+  const saveTimeout = useRef(null);
+  useEffect(() => {
+    if (!store || loading) return;
+    clearTimeout(saveTimeout.current);
+    saveTimeout.current = setTimeout(() => saveStore(store), 300);
+  }, [store, loading]);
+
+  const update = useCallback((fn) => {
+    setStore(prev => { const next = JSON.parse(JSON.stringify(prev)); fn(next); return next; });
+  }, []);
+
+  if (loading || !store) return <div style={{ minHeight: '100vh', background: C.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.textDim, fontFamily: fontMono }}>Loading...</div>;
+
+  const hasSetup = LIFTS.some(l => store.config.trainingMaxes[l] > 0);
+
+  return (
+    <div style={{ minHeight: '100vh', background: C.bg, color: C.text, fontFamily: fontBody, maxWidth: 480, margin: '0 auto', paddingBottom: 90 }}>
+      <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+      {/* Header */}
+      <div style={{ padding: '16px 16px 10px', borderBottom: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <h1 style={{ fontFamily: fontDisplay, fontSize: 22, margin: 0, letterSpacing: 1 }}>DAILY<span style={{ color: C.blue }}>MAX</span> <span style={{ fontSize: 11, color: C.textDim, fontFamily: fontMono, fontWeight: 400 }}>v2</span></h1>
+          <p style={{ fontSize: 9, color: C.textDim, fontFamily: fontMono, letterSpacing: 1.5, margin: '2px 0 0' }}>EVIDENCE-BASED AUTOREGULATION</p>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', borderBottom: `1px solid ${C.border}`, position: 'sticky', top: 0, background: C.bg, zIndex: 10 }}>
+        {TABS.map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            flex: 1, padding: '11px 0', background: 'none', border: 'none',
+            borderBottom: tab===t?`2px solid ${C.blue}`:'2px solid transparent',
+            color: tab===t?C.text:C.textDim, fontFamily: fontMono, fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', cursor: 'pointer',
+          }}>{t === 'data' ? '📤 data' : t}</button>
+        ))}
+      </div>
+
+      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {tab === 'setup' && <SetupTab store={store} update={update} />}
+        {tab === 'session' && (hasSetup ? <SessionTab store={store} update={update} /> : <div style={{ textAlign: 'center', padding: 40, color: C.textDim, fontFamily: fontMono, fontSize: 12 }}>Set up your training maxes first →<br/><button onClick={() => setTab('setup')} style={{ marginTop: 12, padding: '10px 24px', background: C.blue, color: '#fff', border: 'none', borderRadius: 8, fontFamily: fontMono, cursor: 'pointer' }}>GO TO SETUP</button></div>)}
+        {tab === 'history' && <HistoryTab store={store} />}
+        {tab === 'data' && <DataTab store={store} update={update} setStore={setStore} />}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SETUP TAB
+// ═══════════════════════════════════════════════════════════════════════════
+
+function SetupTab({ store, update }) {
+  const { config } = store;
+  return (
+    <>
+      <Card>
+        <Label>Training Maxes / Current e1RM</Label>
+        <p style={{ fontSize: 11, color: C.textDim, margin: '4px 0 12px', lineHeight: 1.5 }}>Enter your highest e1RM from last block or a recent conservative 1RM.</p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {LIFTS.map(l => <NumInput key={l} label={LIFT_NAMES[l]} value={config.baselineE1RMs[l]} onChange={v => update(s => { s.config.baselineE1RMs[l]=v; s.config.trainingMaxes[l]=v; })} />)}
+        </div>
+      </Card>
+
+      <Card>
+        <Label>Minimum Velocity Thresholds</Label>
+        <p style={{ fontSize: 11, color: C.textDim, margin: '4px 0 4px', lineHeight: 1.5 }}>Defaults from Helms et al. (2017). Update with your personal MVT over time.</p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
+          {LIFTS.map(l => <NumInput key={l} label={`${LIFT_NAMES[l]} MVT`} value={config.mvts[l]} onChange={v => update(s => { s.config.mvts[l]=v; })} unit="m/s" step={0.01} min={0.05} max={0.60} />)}
+        </div>
+      </Card>
+
+      <Card>
+        <Label>Typical Training Time</Label>
+        <p style={{ fontSize: 11, color: C.textDim, margin: '4px 0 8px', lineHeight: 1.5 }}>For circadian awareness — warns if you train at unusual times.</p>
+        <NumInput label="Hour (24h)" value={config.typicalHour} onChange={v => update(s => { s.config.typicalHour=v; })} unit="h" step={1} min={0} max={23} />
+      </Card>
+
+      <Card style={{ border: `1px solid ${C.blue}30` }}>
+        <Label>📹 Recommended VBT Apps</Label>
+        <p style={{ fontSize: 11, color: C.textDim, margin: '6px 0 0', lineHeight: 1.6 }}>
+          <strong style={{ color: C.green }}>Metric VBT</strong> (v4.5+) — validated against LPTs, auto rolling averages.<br/>
+          <strong style={{ color: C.green }}>Qwik VBT</strong> — exceptional accuracy in PLOS ONE validation.<br/>
+          <strong style={{ color: C.red }}>Avoid MyLift</strong> for bench — 84% rep detection failure rate.
+        </p>
+      </Card>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSION TAB — The core gym workflow
+// ═══════════════════════════════════════════════════════════════════════════
+
+function SessionTab({ store, update }) {
+  const [step, setStep] = useState(1);
+  const [lift, setLift] = useState('squat');
+  const [sleep, setSleep] = useState(3);
+  const [fatigue, setFatigue] = useState(3);
+  const [stress, setStress] = useState(3);
+  const [calLoad, setCalLoad] = useState(0);
+  const [calVelocity, setCalVelocity] = useState(0);
+  const [prescSets, setPrescSets] = useState(4);
+  const [prescReps, setPrescReps] = useState(4);
+  const [prescRpe, setPrescRpe] = useState(8);
+  const [actualWeight, setActualWeight] = useState(0);
+  const [actualReps, setActualReps] = useState(0);
+  const [actualRpe, setActualRpe] = useState(8);
+  const [showChecklist, setShowChecklist] = useState(false);
+
+  // Auto-set calibration load when lift changes
+  useEffect(() => {
+    const e1rm = store.config.baselineE1RMs[lift] || store.config.trainingMaxes[lift];
+    if (e1rm > 0) setCalLoad(roundTo(e1rm * 0.725)); // midpoint of 70-75%
+  }, [lift, store.config]);
+
+  // §2-3: Compute readiness
+  const subSum = sleep + fatigue + stress;
+  const subHistory = store.subjectiveLog.map(s => s.sum);
+  const subStats = rollingStats(subHistory, 14);
+  const subZ = subHistory.length >= 3 ? zScore(subSum, subStats.avg, subStats.std) : 0;
+  const volumeRec = getVolumeRec(subZ);
+
+  const velHistory = store.velocityLog.filter(v => v.lift === lift).map(v => v.velocity);
+  const velStats = rollingStats(velHistory, 30);
+  const velPctDev = velStats.n >= 3 && calVelocity > 0 ? ((calVelocity - velStats.avg) / velStats.avg) * 100 : 0;
+  const velZ = velStats.n >= 3 && calVelocity > 0 ? zScore(calVelocity, velStats.avg, velStats.std) : 0;
+  const hasVelData = velStats.n >= 3 && calVelocity > 0;
+
+  const status = hasVelData ? getTrafficLight(velPctDev, lift) : 'AMBER';
+  const modifier = hasVelData ? calcReadinessModifier(velPctDev, lift) : 1.0;
+
+  // §6: Working weight calculation
+  const baseE1rm = store.config.baselineE1RMs[lift] || store.config.trainingMaxes[lift];
+  // Update baseline from session history
+  const liftSessions = store.sessions.filter(s => s.lift === lift && s.computed?.e1rm > 0);
+  const recentE1rms = liftSessions.slice(-4).map(s => s.computed.e1rm);
+  const rollingE1rm = recentE1rms.length > 0 ? recentE1rms.reduce((a,b)=>a+b,0)/recentE1rms.length : baseE1rm;
+  const activeE1rm = rollingE1rm || baseE1rm;
+
+  const tablePct = getRpeTablePct(prescReps, prescRpe);
+  const suggestedWeight = roundTo(activeE1rm * tablePct * modifier);
+
+  // §8: Recovery flagging
+  const lastLiftSession = store.sessions.filter(s => s.lift === lift).slice(-1)[0];
+  const hoursSinceLast = lastLiftSession ? (Date.now() - new Date(lastLiftSession.date).getTime()) / 3600000 : 999;
+  const recoveryWarn = lift === 'deadlift' && hoursSinceLast < 48;
+
+  // §9: Circadian warning
+  const currentHour = new Date().getHours();
+  const circadianWarn = Math.abs(currentHour - store.config.typicalHour) > 3;
+
+  // Save session
+  const saveSession = () => {
+    const e1rm = calcE1RM(actualWeight || suggestedWeight, actualReps || prescReps, actualRpe);
+    update(s => {
+      s.sessions.push({
+        date: new Date().toISOString(), time: currentHour, lift,
+        subjective: { sleep, fatigue, stress },
+        calibration: { load: calLoad, velocity: calVelocity, reps: 3 },
+        prescription: { sets: prescSets, reps: prescReps, targetRpe: prescRpe },
+        workingSets: [{ weight: actualWeight || suggestedWeight, reps: actualReps || prescReps, rpe: actualRpe }],
+        computed: { e1rm, velZscore: velZ, subZscore: subZ, status, modifier, volumeRec: volumeRec.label },
+      });
+      if (calVelocity > 0) {
+        s.velocityLog.push({ date: new Date().toISOString(), lift, load: calLoad, velocity: calVelocity });
+      }
+      s.subjectiveLog.push({ date: new Date().toISOString(), sum: subSum });
+      // Update baseline e1rm
+      const recent = s.sessions.filter(x => x.lift === lift && x.computed?.e1rm > 0).slice(-4);
+      if (recent.length > 0) {
+        s.config.baselineE1RMs[lift] = roundTo(recent.reduce((a,b) => a+b.computed.e1rm, 0) / recent.length);
+      }
+    });
+    setStep(6);
+  };
+
+  return (
+    <>
+      {/* Step indicator */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+        {[1,2,3,4,5].map(s => (
+          <div key={s} style={{ flex: 1, height: 3, borderRadius: 2, background: step >= s ? C.blue : C.border, transition: 'background 0.3s' }} />
+        ))}
+      </div>
+
+      {/* Warnings */}
+      {recoveryWarn && <Card style={{ borderColor: C.red+'60' }}><p style={{ fontSize: 11, color: C.red, margin: 0 }}>⚠️ Deadlift &lt;48hrs since last pull — heightened readiness awareness needed (Gemini §2.3)</p></Card>}
+      {circadianWarn && <Card style={{ borderColor: C.amber+'60' }}><p style={{ fontSize: 11, color: C.amber, margin: 0 }}>🕐 Training at unusual time ({currentHour}:00 vs typical {store.config.typicalHour}:00) — velocity comparison may be less reliable</p></Card>}
+
+      {/* STEP 1: Subjective */}
+      {step === 1 && (
+        <Card>
+          <Label>Step 1 — Subjective Readiness</Label>
+          <p style={{ fontSize: 10, color: C.textDim, margin: '4px 0 12px' }}>Modified Hooper Index (Saw et al. 2016)</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <SubjectiveSlider label="Sleep Quality" value={sleep} onChange={setSleep} anchors={['Terrible','Poor','OK','Good','Great']} />
+            <SubjectiveSlider label="Systemic Fatigue" value={fatigue} onChange={setFatigue} anchors={['Wrecked','Heavy','Moderate','Mild','Fresh']} />
+            <SubjectiveSlider label="Mental Stress" value={stress} onChange={setStress} anchors={['Extreme','High','Medium','Low','None']} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+            <div>
+              <Label>Sum</Label>
+              <span style={{ fontFamily: fontDisplay, fontSize: 20, color: subSum >= 12 ? C.green : subSum >= 8 ? C.amber : C.red, marginLeft: 8 }}>{subSum}/15</span>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <Label>Volume Rec</Label>
+              <span style={{ fontFamily: fontMono, fontSize: 11, fontWeight: 700, color: volumeRec.color, marginLeft: 8 }}>{volumeRec.label}</span>
+            </div>
+          </div>
+          <button onClick={() => setStep(2)} style={{ width: '100%', marginTop: 12, padding: '12px 0', borderRadius: 8, border: 'none', background: C.blue, color: '#fff', fontFamily: fontMono, fontSize: 13, fontWeight: 700, letterSpacing: 2, cursor: 'pointer' }}>NEXT →</button>
+        </Card>
+      )}
+
+      {/* STEP 2: Select Lift */}
+      {step === 2 && (
+        <Card>
+          <Label>Step 2 — Select Lift</Label>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            {LIFTS.map(l => store.config.baselineE1RMs[l] > 0 && (
+              <button key={l} onClick={() => { setLift(l); setStep(3); }} style={{
+                flex: 1, padding: '16px 0', borderRadius: 10, cursor: 'pointer',
+                border: `1.5px solid ${lift===l?C.blue:C.border}`, background: lift===l?C.blueBg:C.surfaceAlt,
+                color: lift===l?C.blue:C.textDim, fontFamily: fontMono, fontSize: 12, fontWeight: 700, letterSpacing: 2, textTransform: 'uppercase',
+              }}>{LIFT_NAMES[l]}<br/><span style={{ fontSize: 10, fontWeight: 400, opacity: 0.7 }}>e1RM: {roundTo(activeE1rm)}kg</span></button>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* STEP 3: Velocity Calibration */}
+      {step === 3 && (
+        <Card>
+          <Label>Step 3 — Velocity Calibration</Label>
+          <p style={{ fontSize: 10, color: C.textDim, margin: '4px 0 8px' }}>1-point method at 70-75% e1RM (Gemini §5.1)</p>
+
+          {!showChecklist ? (
+            <button onClick={() => setShowChecklist(true)} style={{ width: '100%', padding: '8px 0', background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 6, color: C.textDim, fontFamily: fontMono, fontSize: 10, cursor: 'pointer', marginBottom: 10 }}>📹 Show filming checklist</button>
+          ) : (
+            <div style={{ background: C.surfaceAlt, borderRadius: 8, padding: 12, marginBottom: 10, fontSize: 11, color: C.textDim, lineHeight: 1.7, fontFamily: fontMono }}>
+              ✓ Phone on tripod/stable surface<br/>
+              ✓ Camera ⊥ to barbell (0-10°)<br/>
+              ✓ Lens at waist height (SQ/BP) or knee (DL)<br/>
+              ✓ Good lighting, no glare on plates<br/>
+              ✓ MAXIMAL concentric intent<br/>
+              <button onClick={() => setShowChecklist(false)} style={{ marginTop: 6, background: 'none', border: 'none', color: C.blue, fontFamily: fontMono, fontSize: 10, cursor: 'pointer' }}>hide</button>
+            </div>
+          )}
+
+          <NumInput label={`Calibration Load (≈${roundTo(activeE1rm*0.725)}kg recommended)`} value={calLoad} onChange={setCalLoad} />
+          <div style={{ marginTop: 10 }}>
+            <NumInput label="Peak Velocity (fastest rep from VBT app)" value={calVelocity} onChange={setCalVelocity} unit="m/s" step={0.01} min={0} max={2} />
+          </div>
+
+          {hasVelData && (
+            <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: STATUS_COLORS[status]+'12', border: `1px solid ${STATUS_COLORS[status]}30` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <StatusBadge status={status} />
+                <span style={{ fontFamily: fontMono, fontSize: 12, color: STATUS_COLORS[status] }}>{velPctDev >= 0?'+':''}{velPctDev.toFixed(1)}% vs avg</span>
+              </div>
+              <p style={{ fontSize: 10, color: C.textDim, margin: '6px 0 0', fontFamily: fontMono }}>
+                30d avg: {velStats.avg.toFixed(3)} m/s | Today: {calVelocity.toFixed(3)} m/s | Modifier: ×{modifier.toFixed(3)}
+              </p>
+            </div>
+          )}
+          {!hasVelData && calVelocity > 0 && (
+            <p style={{ fontSize: 10, color: C.amber, marginTop: 8, fontFamily: fontMono }}>Need ≥3 sessions for velocity Z-score. Recording baseline — defaulting to AMBER.</p>
+          )}
+
+          <button onClick={() => setStep(4)} style={{ width: '100%', marginTop: 12, padding: '12px 0', borderRadius: 8, border: 'none', background: C.blue, color: '#fff', fontFamily: fontMono, fontSize: 13, fontWeight: 700, letterSpacing: 2, cursor: 'pointer' }}>NEXT →</button>
+        </Card>
+      )}
+
+      {/* STEP 4: Coach Prescription → Weight Output */}
+      {step === 4 && (
+        <Card>
+          <Label>Step 4 — Coach's Prescription</Label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+            <NumInput label="Sets" value={prescSets} onChange={setPrescSets} unit="sets" step={1} min={1} max={10} />
+            <NumInput label="Reps" value={prescReps} onChange={setPrescReps} unit="reps" step={1} min={1} max={12} />
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <Label>Target RPE</Label>
+            <div style={{ marginTop: 6 }}><RpeSelect value={prescRpe} onChange={setPrescRpe} /></div>
+          </div>
+
+          {/* THE MONEY OUTPUT */}
+          <div style={{ marginTop: 16, padding: 20, borderRadius: 12, background: C.bg, border: `1.5px solid ${STATUS_COLORS[status]}40`, textAlign: 'center' }}>
+            <Label>Load this weight</Label>
+            <div style={{ marginTop: 6 }}><BigNum value={suggestedWeight} unit="kg" color={STATUS_COLORS[status]} /></div>
+            <p style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono, margin: '8px 0 0' }}>
+              {roundTo(activeE1rm)}kg e1RM × {(tablePct*100).toFixed(1)}% ({prescReps}@{prescRpe}) × {modifier.toFixed(3)} readiness
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 10 }}>
+              <StatusBadge status={status} size="small" />
+              <span style={{ fontFamily: fontMono, fontSize: 10, color: volumeRec.color, padding: '4px 10px', borderRadius: 6, border: `1px solid ${volumeRec.color}30`, background: volumeRec.color+'12' }}>{volumeRec.label}</span>
+            </div>
+          </div>
+
+          <button onClick={() => setStep(5)} style={{ width: '100%', marginTop: 12, padding: '12px 0', borderRadius: 8, border: 'none', background: C.blue, color: '#fff', fontFamily: fontMono, fontSize: 13, fontWeight: 700, letterSpacing: 2, cursor: 'pointer' }}>LOG RESULTS →</button>
+        </Card>
+      )}
+
+      {/* STEP 5: Post-set logging */}
+      {step === 5 && (
+        <Card>
+          <Label>Step 5 — Log Working Sets</Label>
+          <p style={{ fontSize: 10, color: C.textDim, margin: '4px 0 10px' }}>Log your top set for e1RM tracking</p>
+          <NumInput label="Weight Used" value={actualWeight || suggestedWeight} onChange={setActualWeight} />
+          <div style={{ marginTop: 10 }}><NumInput label="Reps Completed" value={actualReps || prescReps} onChange={setActualReps} unit="reps" step={1} min={1} max={20} /></div>
+          <div style={{ marginTop: 10 }}>
+            <Label>Actual RPE</Label>
+            <div style={{ marginTop: 6 }}><RpeSelect value={actualRpe} onChange={setActualRpe} /></div>
+          </div>
+          <p style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono, marginTop: 10 }}>
+            e1RM from this set: <strong style={{ color: C.text }}>{roundTo(calcE1RM(actualWeight||suggestedWeight, actualReps||prescReps, actualRpe))}kg</strong>
+          </p>
+          <button onClick={saveSession} style={{ width: '100%', marginTop: 12, padding: '12px 0', borderRadius: 8, border: `1.5px solid ${C.green}`, background: C.greenBg, color: C.green, fontFamily: fontMono, fontSize: 13, fontWeight: 700, letterSpacing: 2, cursor: 'pointer' }}>SAVE SESSION ✓</button>
+        </Card>
+      )}
+
+      {/* STEP 6: Done */}
+      {step === 6 && (
+        <Card style={{ textAlign: 'center' }}>
+          <span style={{ fontSize: 32 }}>✓</span>
+          <p style={{ fontFamily: fontDisplay, fontSize: 18, margin: '8px 0 4px' }}>Session Logged</p>
+          <p style={{ fontSize: 11, color: C.textDim, fontFamily: fontMono }}>e1RM and rolling averages updated</p>
+          <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+            <button onClick={() => { setStep(2); }} style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: `1px solid ${C.border}`, background: C.surfaceAlt, color: C.textDim, fontFamily: fontMono, fontSize: 11, cursor: 'pointer' }}>Log Another Lift</button>
+            <button onClick={() => {
+              const s = store.sessions.slice(-1)[0];
+              if (!s) return;
+              const txt = `📊 Session Report — ${new Date(s.date).toLocaleDateString('de-DE')}\n${LIFT_NAMES[s.lift]}: ${s.computed.status} day\nPrescribed: ${s.prescription.sets}×${s.prescription.reps}@RPE ${s.prescription.targetRpe}\nWeight: ${s.workingSets[0]?.weight}kg (suggested: ${roundTo(activeE1rm*tablePct*modifier)}kg)\nActual RPE: ${s.workingSets[0]?.rpe}\ne1RM: ${roundTo(s.computed.e1rm)}kg\nReadiness: ${s.computed.status} (vel ${(velPctDev>=0?'+':'')+velPctDev.toFixed(1)}%) | Volume: ${s.computed.volumeRec}`;
+              navigator.clipboard?.writeText(txt).then(() => alert('Copied to clipboard!')).catch(() => {});
+            }} style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: `1px solid ${C.blue}40`, background: C.blueBg, color: C.blue, fontFamily: fontMono, fontSize: 11, cursor: 'pointer' }}>📋 Copy for Coach</button>
+          </div>
+        </Card>
+      )}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HISTORY TAB
+// ═══════════════════════════════════════════════════════════════════════════
+
+function HistoryTab({ store }) {
+  return (
+    <>
+      {LIFTS.map(lift => {
+        const sessions = store.sessions.filter(s => s.lift === lift && s.computed?.e1rm > 0);
+        if (sessions.length < 1) return null;
+        const e1rms = sessions.map(s => s.computed.e1rm);
+        const vels = store.velocityLog.filter(v => v.lift === lift).map(v => v.velocity);
+        const trend = e1rms.length >= 2 ? ((e1rms[e1rms.length-1]/e1rms[0])-1)*100 : 0;
+        const statusCounts = { GREEN: 0, AMBER: 0, RED: 0, CRITICAL: 0 };
+        sessions.forEach(s => { if (s.computed.status) statusCounts[s.computed.status]++; });
+        const total = sessions.length;
+
+        return (
+          <Card key={lift} style={{ marginBottom: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <Label>{LIFT_NAMES[lift]}</Label>
+              <span style={{ fontFamily: fontMono, fontSize: 11, color: trend >= 0 ? C.green : C.red }}>{trend>=0?'+':''}{trend.toFixed(1)}%</span>
+            </div>
+
+            {e1rms.length >= 2 && (
+              <div style={{ marginBottom: 8 }}>
+                <span style={{ fontSize: 9, color: C.textMuted, fontFamily: fontMono }}>e1RM TREND</span>
+                <Spark data={e1rms} color={trend >= 0 ? C.green : C.red} />
+              </div>
+            )}
+            {vels.length >= 2 && (
+              <div style={{ marginBottom: 8 }}>
+                <span style={{ fontSize: 9, color: C.textMuted, fontFamily: fontMono }}>VELOCITY TREND (calibration)</span>
+                <Spark data={vels} color={C.blue} />
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 4 }}>
+              {Object.entries(statusCounts).map(([s, n]) => n > 0 && (
+                <span key={s} style={{ fontFamily: fontMono, fontSize: 9, color: STATUS_COLORS[s], padding: '2px 6px', borderRadius: 4, background: STATUS_COLORS[s]+'15' }}>
+                  {s}: {n} ({Math.round(n/total*100)}%)
+                </span>
+              ))}
+            </div>
+
+            <div style={{ marginTop: 8, maxHeight: 200, overflowY: 'auto' }}>
+              {[...sessions].reverse().slice(0, 10).map((s, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderTop: i>0?`1px solid ${C.border}`:'none' }}>
+                  <div>
+                    <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono }}>{new Date(s.date).toLocaleDateString('de-DE')}</span>
+                    <span style={{ fontSize: 11, color: C.text, fontFamily: fontMono, marginLeft: 8 }}>{s.workingSets[0]?.weight}kg × {s.workingSets[0]?.reps} @{s.workingSets[0]?.rpe}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono }}>e1RM: {roundTo(s.computed.e1rm)}</span>
+                    <StatusBadge status={s.computed.status} size="small" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        );
+      })}
+
+      {/* Subjective trend */}
+      {store.subjectiveLog.length >= 2 && (
+        <Card>
+          <Label>Subjective Wellbeing Trend</Label>
+          <Spark data={store.subjectiveLog.map(s => s.sum)} color={C.amber} />
+        </Card>
+      )}
+
+      {store.sessions.length === 0 && (
+        <div style={{ textAlign: 'center', padding: 40, color: C.textDim, fontFamily: fontMono, fontSize: 12 }}>No sessions logged yet.</div>
+      )}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA TAB — Import, Export, Backup, Historical data entry
+// ═══════════════════════════════════════════════════════════════════════════
+
+function DataTab({ store, update, setStore }) {
+  const [importText, setImportText] = useState('');
+  const [importStatus, setImportStatus] = useState('');
+  const [bulkText, setBulkText] = useState('');
+  const [bulkStatus, setBulkStatus] = useState('');
+
+  // Export all data as JSON
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify(store, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `dailymax-backup-${new Date().toISOString().split('T')[0]}.json`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  // Import from JSON backup
+  const importData = () => {
+    try {
+      const parsed = JSON.parse(importText);
+      if (!parsed.config || !parsed.sessions) throw new Error('Invalid format');
+      setStore({ ...EMPTY_STORE, ...parsed });
+      setImportStatus('✅ Restored successfully!');
+    } catch (e) {
+      setImportStatus('❌ Invalid JSON: ' + e.message);
+    }
+  };
+
+  // Bulk import historical top sets (CSV-like: date, lift, weight, reps, rpe)
+  const importBulk = () => {
+    try {
+      const lines = bulkText.trim().split('\n').filter(l => l.trim() && !l.startsWith('#'));
+      let count = 0;
+      update(s => {
+        lines.forEach(line => {
+          const parts = line.split(/[,\t;]+/).map(p => p.trim());
+          if (parts.length < 5) return;
+          const [dateStr, liftRaw, weightStr, repsStr, rpeStr] = parts;
+          const lift = liftRaw.toLowerCase().replace(/\s/g, '');
+          if (!LIFTS.includes(lift)) return;
+          const weight = parseFloat(weightStr), reps = parseInt(repsStr), rpe = parseFloat(rpeStr);
+          if (isNaN(weight) || isNaN(reps) || isNaN(rpe)) return;
+          const e1rm = calcE1RM(weight, reps, rpe);
+          s.sessions.push({
+            date: new Date(dateStr).toISOString(), time: 17, lift,
+            subjective: { sleep: 3, fatigue: 3, stress: 3 },
+            calibration: { load: 0, velocity: 0, reps: 0 },
+            prescription: { sets: 1, reps, targetRpe: rpe },
+            workingSets: [{ weight, reps, rpe }],
+            computed: { e1rm, velZscore: 0, subZscore: 0, status: 'AMBER', modifier: 1.0, volumeRec: 'FULL VOLUME' },
+          });
+          count++;
+        });
+        // Update baseline e1RMs from imported data
+        LIFTS.forEach(l => {
+          const recent = s.sessions.filter(x => x.lift === l && x.computed?.e1rm > 0).slice(-4);
+          if (recent.length > 0) {
+            s.config.baselineE1RMs[l] = roundTo(recent.reduce((a,b) => a+b.computed.e1rm, 0) / recent.length);
+            s.config.trainingMaxes[l] = s.config.baselineE1RMs[l];
+          }
+        });
+      });
+      setBulkStatus(`✅ Imported ${count} sessions. Baseline e1RMs updated.`);
+    } catch (e) {
+      setBulkStatus('❌ Error: ' + e.message);
+    }
+  };
+
+  const clearAll = () => {
+    if (confirm('Delete ALL data? This cannot be undone.')) {
+      setStore(JSON.parse(JSON.stringify(EMPTY_STORE)));
+    }
+  };
+
+  return (
+    <>
+      {/* Backup / Restore */}
+      <Card>
+        <Label>📤 Export / Backup</Label>
+        <p style={{ fontSize: 11, color: C.textDim, margin: '4px 0 10px', lineHeight: 1.5 }}>Downloads all your data as a JSON file. Keep this safe.</p>
+        <button onClick={exportData} style={{ width: '100%', padding: '12px 0', borderRadius: 8, border: `1.5px solid ${C.green}`, background: C.greenBg, color: C.green, fontFamily: fontMono, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>DOWNLOAD BACKUP</button>
+      </Card>
+
+      <Card>
+        <Label>📥 Restore from Backup</Label>
+        <p style={{ fontSize: 11, color: C.textDim, margin: '4px 0 10px', lineHeight: 1.5 }}>Paste the contents of a backup JSON file below.</p>
+        <textarea value={importText} onChange={e => setImportText(e.target.value)} placeholder='Paste JSON backup here...'
+          style={{ width: '100%', height: 80, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontFamily: fontMono, fontSize: 11, padding: 10, resize: 'vertical', outline: 'none', boxSizing: 'border-box' }} />
+        <button onClick={importData} style={{ width: '100%', marginTop: 8, padding: '10px 0', borderRadius: 8, border: `1px solid ${C.blue}40`, background: C.blueBg, color: C.blue, fontFamily: fontMono, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>RESTORE</button>
+        {importStatus && <p style={{ fontSize: 11, fontFamily: fontMono, marginTop: 6, color: importStatus.startsWith('✅') ? C.green : C.red }}>{importStatus}</p>}
+      </Card>
+
+      {/* Bulk import historical data */}
+      <Card>
+        <Label>📋 Import Historical Top Sets</Label>
+        <p style={{ fontSize: 11, color: C.textDim, margin: '4px 0 4px', lineHeight: 1.5 }}>Paste your historical RPE data to bootstrap rolling averages. One set per line:</p>
+        <p style={{ fontSize: 10, color: C.blue, fontFamily: fontMono, margin: '0 0 10px' }}>date, lift, weight, reps, rpe</p>
+        <textarea value={bulkText} onChange={e => setBulkText(e.target.value)}
+          placeholder={"# Example:\n2025-02-01, squat, 150, 4, 8\n2025-02-01, bench, 100, 5, 7.5\n2025-02-03, deadlift, 180, 3, 8.5"}
+          style={{ width: '100%', height: 120, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontFamily: fontMono, fontSize: 11, padding: 10, resize: 'vertical', outline: 'none', boxSizing: 'border-box' }} />
+        <button onClick={importBulk} style={{ width: '100%', marginTop: 8, padding: '10px 0', borderRadius: 8, border: `1px solid ${C.blue}40`, background: C.blueBg, color: C.blue, fontFamily: fontMono, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>IMPORT SETS</button>
+        {bulkStatus && <p style={{ fontSize: 11, fontFamily: fontMono, marginTop: 6, color: bulkStatus.startsWith('✅') ? C.green : C.red }}>{bulkStatus}</p>}
+      </Card>
+
+      {/* Stats */}
+      <Card>
+        <Label>Storage Stats</Label>
+        <p style={{ fontSize: 11, color: C.textDim, fontFamily: fontMono, margin: '6px 0', lineHeight: 1.8 }}>
+          Sessions: {store.sessions.length}<br/>
+          Velocity readings: {store.velocityLog.length}<br/>
+          Subjective entries: {store.subjectiveLog.length}
+        </p>
+      </Card>
+
+      {/* Danger zone */}
+      <Card style={{ borderColor: C.red+'30' }}>
+        <Label>⚠️ Danger Zone</Label>
+        <button onClick={clearAll} style={{ width: '100%', marginTop: 8, padding: '10px 0', borderRadius: 8, border: `1px solid ${C.red}40`, background: C.redBg, color: C.red, fontFamily: fontMono, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>DELETE ALL DATA</button>
+      </Card>
+    </>
+  );
+}
+
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+  <script>
+    if('serviceWorker' in navigator){window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').catch(()=>{});})}
+  </script>
+</body>
+</html>
