@@ -215,6 +215,20 @@ function RpeSelect({ value, onChange }) {
   );
 }
 
+function CalRpeSelect({ value, onChange }) {
+  return (
+    <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+      {[2,3,4,5,6,7,8,9,10].map(r => (
+        <button key={r} onClick={() => onChange(r)} style={{
+          padding: '7px 0', borderRadius: 6, flex: 1, minWidth: 30, textAlign: 'center',
+          border: `1px solid ${value===r?C.blue:C.border}`, background: value===r?C.blueBg:C.surfaceAlt,
+          color: value===r?C.blue:C.textDim, fontFamily: fontMono, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+        }}>{r}</button>
+      ))}
+    </div>
+  );
+}
+
 function SubjectiveSlider({ label, value, onChange, anchors }) {
   const color = value <= 2 ? C.red : value <= 3 ? C.amber : C.green;
   return (
@@ -385,6 +399,7 @@ function SessionTab({ store, update }) {
   const [stress, setStress] = useState(3);
   const [calLoad, setCalLoad] = useState(0);
   const [calVelocity, setCalVelocity] = useState(0);
+  const [calRpe, setCalRpe] = useState(null);
   const [prescSets, setPrescSets] = useState(4);
   const [prescReps, setPrescReps] = useState(4);
   const [prescRpe, setPrescRpe] = useState(8);
@@ -442,7 +457,7 @@ function SessionTab({ store, update }) {
       s.sessions.push({
         date: new Date().toISOString(), time: currentHour, lift,
         subjective: { sleep, fatigue, stress },
-        calibration: { load: calLoad, velocity: calVelocity, reps: 3 },
+        calibration: { load: calLoad, velocity: calVelocity, reps: 3, rpe: calRpe },
         prescription: { sets: prescSets, reps: prescReps, targetRpe: prescRpe },
         workingSets: [{ weight: actualWeight || suggestedWeight, reps: actualReps || prescReps, rpe: actualRpe }],
         computed: { e1rm, velZscore: velZ, subZscore: subZ, status, modifier, volumeRec: volumeRec.label },
@@ -502,13 +517,20 @@ function SessionTab({ store, update }) {
         <Card>
           <Label>Step 2 — Select Lift</Label>
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            {LIFTS.map(l => store.config.baselineE1RMs[l] > 0 && (
-              <button key={l} onClick={() => { setLift(l); setStep(3); }} style={{
-                flex: 1, padding: '16px 0', borderRadius: 10, cursor: 'pointer',
-                border: `1.5px solid ${lift===l?C.blue:C.border}`, background: lift===l?C.blueBg:C.surfaceAlt,
-                color: lift===l?C.blue:C.textDim, fontFamily: fontMono, fontSize: 12, fontWeight: 700, letterSpacing: 2, textTransform: 'uppercase',
-              }}>{LIFT_NAMES[l]}<br/><span style={{ fontSize: 10, fontWeight: 400, opacity: 0.7 }}>e1RM: {roundTo(activeE1rm)}kg</span></button>
-            ))}
+            {LIFTS.map(l => {
+              if (!(store.config.baselineE1RMs[l] > 0)) return null;
+              const baseForLift = store.config.baselineE1RMs[l] || store.config.trainingMaxes[l];
+              const sessionsForLift = store.sessions.filter(s => s.lift === l && s.computed?.e1rm > 0);
+              const recentForLift = sessionsForLift.slice(-4).map(s => s.computed.e1rm);
+              const e1rmForLift = recentForLift.length > 0 ? roundTo(recentForLift.reduce((a,b)=>a+b,0)/recentForLift.length) : roundTo(baseForLift);
+              return (
+                <button key={l} onClick={() => { setLift(l); setStep(3); }} style={{
+                  flex: 1, padding: '16px 0', borderRadius: 10, cursor: 'pointer',
+                  border: `1.5px solid ${lift===l?C.blue:C.border}`, background: lift===l?C.blueBg:C.surfaceAlt,
+                  color: lift===l?C.blue:C.textDim, fontFamily: fontMono, fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: 'uppercase',
+                }}>{LIFT_NAMES[l]}<br/><span style={{ fontSize: 10, fontWeight: 400, opacity: 0.7 }}>{e1rmForLift}kg</span></button>
+              );
+            })}
           </div>
         </Card>
       )}
@@ -532,20 +554,45 @@ function SessionTab({ store, update }) {
             </div>
           )}
 
-          <NumInput label={`Calibration Load (≈${roundTo(activeE1rm*0.725)}kg recommended)`} value={calLoad} onChange={setCalLoad} />
+          <NumInput label={`Calibration Load (≈${roundTo(activeE1rm*0.725)}kg rec.)`} value={calLoad} onChange={setCalLoad} />
           <div style={{ marginTop: 10 }}>
-            <NumInput label="Peak Velocity (fastest rep from VBT app)" value={calVelocity} onChange={setCalVelocity} unit="m/s" step={0.01} min={0} max={2} />
+            <NumInput label="Peak Velocity (fastest rep)" value={calVelocity} onChange={setCalVelocity} unit="m/s" step={0.01} min={0} max={2} />
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <Label>Calibration Set RPE (how did it feel?)</Label>
+            <div style={{ marginTop: 6 }}><CalRpeSelect value={calRpe} onChange={setCalRpe} /></div>
           </div>
 
+          {/* RPE vs Velocity discrepancy check */}
+          {hasVelData && calRpe && (
+            (() => {
+              const expectedRpeFromVel = velPctDev > 3 ? 'easier than usual' : velPctDev < -5 ? 'harder than usual' : 'about normal';
+              const perceivedEasy = calRpe <= 4;
+              const perceivedHard = calRpe >= 7;
+              const velSaysEasy = velPctDev > 3;
+              const velSaysHard = velPctDev < -5;
+              const mismatch = (perceivedEasy && velSaysHard) || (perceivedHard && velSaysEasy);
+              return mismatch ? (
+                <div style={{ marginTop: 8, padding: 8, borderRadius: 6, background: C.amberBg, border: `1px solid ${C.amber}30` }}>
+                  <p style={{ fontSize: 10, color: C.amber, margin: 0, fontFamily: fontMono }}>
+                    ⚠️ RPE/velocity mismatch — you rated RPE {calRpe} but velocity says {expectedRpeFromVel}. Trust the velocity for load decisions.
+                  </p>
+                </div>
+              ) : null;
+            })()
+          )}
+
           {hasVelData && (
-            <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: STATUS_COLORS[status]+'12', border: `1px solid ${STATUS_COLORS[status]}30` }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: STATUS_COLORS[status]+'12', border: `1px solid ${STATUS_COLORS[status]}30`, overflow: 'hidden' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
                 <StatusBadge status={status} />
-                <span style={{ fontFamily: fontMono, fontSize: 12, color: STATUS_COLORS[status] }}>{velPctDev >= 0?'+':''}{velPctDev.toFixed(1)}% vs avg</span>
+                <span style={{ fontFamily: fontMono, fontSize: 12, color: STATUS_COLORS[status] }}>{velPctDev >= 0?'+':''}{velPctDev.toFixed(1)}%</span>
               </div>
-              <p style={{ fontSize: 10, color: C.textDim, margin: '6px 0 0', fontFamily: fontMono }}>
-                30d avg: {velStats.avg.toFixed(3)} m/s | Today: {calVelocity.toFixed(3)} m/s | Modifier: ×{modifier.toFixed(3)}
-              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                <span style={{ fontSize: 9, color: C.textDim, fontFamily: fontMono }}>30d: {velStats.avg.toFixed(3)}</span>
+                <span style={{ fontSize: 9, color: C.textDim, fontFamily: fontMono }}>Today: {calVelocity.toFixed(3)}</span>
+                <span style={{ fontSize: 9, color: C.textDim, fontFamily: fontMono }}>Mod: ×{modifier.toFixed(3)}</span>
+              </div>
             </div>
           )}
           {!hasVelData && calVelocity > 0 && (
@@ -828,6 +875,7 @@ function DataTab({ store, update, setStore }) {
     </>
   );
 }
+
 
     ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
   </script>
