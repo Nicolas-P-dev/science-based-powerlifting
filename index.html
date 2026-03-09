@@ -407,6 +407,7 @@ function SessionTab({ store, update }) {
   const [actualReps, setActualReps] = useState(0);
   const [actualRpe, setActualRpe] = useState(8);
   const [showChecklist, setShowChecklist] = useState(false);
+  const [loggedSets, setLoggedSets] = useState([]);
 
   // Auto-set calibration load when lift changes
   useEffect(() => {
@@ -451,16 +452,38 @@ function SessionTab({ store, update }) {
   const circadianWarn = Math.abs(currentHour - store.config.typicalHour) > 3;
 
   // Save session
+  const addSet = () => {
+    const w = actualWeight || suggestedWeight;
+    const r = actualReps || prescReps;
+    const rpe = actualRpe;
+    setLoggedSets(prev => [...prev, { weight: w, reps: r, rpe }]);
+    setActualWeight(0);
+    setActualReps(0);
+    setActualRpe(8);
+  };
+
   const saveSession = () => {
-    const e1rm = calcE1RM(actualWeight || suggestedWeight, actualReps || prescReps, actualRpe);
+    // Include current inputs as a set if they have data
+    const currentW = actualWeight || suggestedWeight;
+    const currentR = actualReps || prescReps;
+    const allSets = [...loggedSets];
+    if (currentW > 0 && currentR > 0) {
+      allSets.push({ weight: currentW, reps: currentR, rpe: actualRpe });
+    }
+    if (allSets.length === 0) return;
+
+    // Use the highest e1RM from all sets (best set of the day)
+    const e1rms = allSets.map(s => calcE1RM(s.weight, s.reps, s.rpe));
+    const bestE1rm = Math.max(...e1rms);
+
     update(s => {
       s.sessions.push({
         date: new Date().toISOString(), time: currentHour, lift,
         subjective: { sleep, fatigue, stress },
         calibration: { load: calLoad, velocity: calVelocity, reps: 3, rpe: calRpe },
         prescription: { sets: prescSets, reps: prescReps, targetRpe: prescRpe },
-        workingSets: [{ weight: actualWeight || suggestedWeight, reps: actualReps || prescReps, rpe: actualRpe }],
-        computed: { e1rm, velZscore: velZ, subZscore: subZ, status, modifier, volumeRec: volumeRec.label },
+        workingSets: allSets,
+        computed: { e1rm: bestE1rm, velZscore: velZ, subZscore: subZ, status, modifier, volumeRec: volumeRec.label },
       });
       if (calVelocity > 0) {
         s.velocityLog.push({ date: new Date().toISOString(), lift, load: calLoad, velocity: calVelocity });
@@ -472,6 +495,7 @@ function SessionTab({ store, update }) {
         s.config.baselineE1RMs[lift] = roundTo(recent.reduce((a,b) => a+b.computed.e1rm, 0) / recent.length);
       }
     });
+    setLoggedSets([]);
     setStep(6);
   };
 
@@ -657,7 +681,23 @@ function SessionTab({ store, update }) {
             <Label>Step 5 — Log Working Sets</Label>
             <button onClick={() => setStep(4)} style={{ background: 'none', border: 'none', color: C.textDim, fontFamily: fontMono, fontSize: 11, cursor: 'pointer' }}>← Back</button>
           </div>
-          <p style={{ fontSize: 10, color: C.textDim, margin: '4px 0 10px' }}>Log your top set for e1RM tracking</p>
+          <p style={{ fontSize: 10, color: C.textDim, margin: '4px 0 10px' }}>Log your top set(s) — best e1RM is used for tracking</p>
+
+          {/* Already logged sets */}
+          {loggedSets.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {loggedSets.map((s, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 8px', background: C.surfaceAlt, borderRadius: 6, marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, color: C.text, fontFamily: fontMono }}>{s.weight}kg × {s.reps} @RPE {s.rpe}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono }}>e1RM: {roundTo(calcE1RM(s.weight, s.reps, s.rpe))}kg</span>
+                    <button onClick={() => setLoggedSets(prev => prev.filter((_, j) => j !== i))} style={{ background: 'none', border: 'none', color: C.red, fontFamily: fontMono, fontSize: 12, cursor: 'pointer', padding: 0 }}>✕</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           <NumInput label="Weight Used" value={actualWeight || suggestedWeight} onChange={setActualWeight} />
           <div style={{ marginTop: 10 }}><NumInput label="Reps Completed" value={actualReps || prescReps} onChange={setActualReps} unit="reps" step={1} min={1} max={20} /></div>
           <div style={{ marginTop: 10 }}>
@@ -667,7 +707,11 @@ function SessionTab({ store, update }) {
           <p style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono, marginTop: 10 }}>
             e1RM from this set: <strong style={{ color: C.text }}>{roundTo(calcE1RM(actualWeight||suggestedWeight, actualReps||prescReps, actualRpe))}kg</strong>
           </p>
-          <button onClick={saveSession} style={{ width: '100%', marginTop: 12, padding: '12px 0', borderRadius: 8, border: `1.5px solid ${C.green}`, background: C.greenBg, color: C.green, fontFamily: fontMono, fontSize: 13, fontWeight: 700, letterSpacing: 2, cursor: 'pointer' }}>SAVE SESSION ✓</button>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button onClick={addSet} style={{ flex: 1, padding: '12px 0', borderRadius: 8, border: `1px solid ${C.border}`, background: C.surfaceAlt, color: C.textDim, fontFamily: fontMono, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>+ Add Set</button>
+            <button onClick={saveSession} style={{ flex: 1, padding: '12px 0', borderRadius: 8, border: `1.5px solid ${C.green}`, background: C.greenBg, color: C.green, fontFamily: fontMono, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>SAVE ✓</button>
+          </div>
         </Card>
       )}
 
@@ -681,30 +725,30 @@ function SessionTab({ store, update }) {
           {/* Edit last session RPE */}
           {store.sessions.length > 0 && (() => {
             const last = store.sessions[store.sessions.length - 1];
-            const lastRpe = last.workingSets[0]?.rpe;
             return (
               <div style={{ marginTop: 12, padding: 12, borderRadius: 8, background: C.surfaceAlt, textAlign: 'left' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <Label>Logged: {last.workingSets[0]?.weight}kg × {last.workingSets[0]?.reps} @ RPE {lastRpe}</Label>
-                  <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono }}>e1RM: {roundTo(last.computed.e1rm)}kg</span>
-                </div>
-                <Label>Change RPE if needed:</Label>
-                <div style={{ marginTop: 6 }}>
-                  <RpeSelect value={lastRpe} onChange={(newRpe) => {
-                    update(s => {
-                      const sess = s.sessions[s.sessions.length - 1];
-                      sess.workingSets[0].rpe = newRpe;
-                      const w = sess.workingSets[0].weight;
-                      const r = sess.workingSets[0].reps;
-                      sess.computed.e1rm = calcE1RM(w, r, newRpe);
-                      // Recalculate baseline e1rm
-                      const recent = s.sessions.filter(x => x.lift === sess.lift && x.computed?.e1rm > 0).slice(-4);
-                      if (recent.length > 0) {
-                        s.config.baselineE1RMs[sess.lift] = roundTo(recent.reduce((a,b) => a+b.computed.e1rm, 0) / recent.length);
-                      }
-                    });
-                  }} />
-                </div>
+                <Label>Logged sets (tap RPE to edit):</Label>
+                {last.workingSets.map((ws, wi) => (
+                  <div key={wi} style={{ marginTop: 8, paddingTop: wi > 0 ? 8 : 0, borderTop: wi > 0 ? `1px solid ${C.border}` : 'none' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <span style={{ fontSize: 11, color: C.text, fontFamily: fontMono }}>{ws.weight}kg × {ws.reps} @RPE {ws.rpe}</span>
+                      <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono }}>e1RM: {roundTo(calcE1RM(ws.weight, ws.reps, ws.rpe))}kg</span>
+                    </div>
+                    <RpeSelect value={ws.rpe} onChange={(newRpe) => {
+                      update(st => {
+                        const sess = st.sessions[st.sessions.length - 1];
+                        sess.workingSets[wi].rpe = newRpe;
+                        const e1rms = sess.workingSets.map(s => calcE1RM(s.weight, s.reps, s.rpe));
+                        sess.computed.e1rm = Math.max(...e1rms);
+                        const recent = st.sessions.filter(x => x.lift === sess.lift && x.computed?.e1rm > 0).slice(-4);
+                        if (recent.length > 0) {
+                          st.config.baselineE1RMs[sess.lift] = roundTo(recent.reduce((a,b) => a+b.computed.e1rm, 0) / recent.length);
+                        }
+                      });
+                    }} />
+                  </div>
+                ))}
+                <p style={{ fontSize: 9, color: C.textDim, fontFamily: fontMono, marginTop: 8 }}>Best e1RM: {roundTo(last.computed.e1rm)}kg</p>
               </div>
             );
           })()}
@@ -778,9 +822,11 @@ function HistoryTab({ store, update }) {
                 return (
                   <div key={i} style={{ padding: '6px 0', borderTop: i>0?`1px solid ${C.border}`:'none' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setEditingIdx(isEditing ? null : globalIdx)}>
-                      <div>
+                      <div style={{ minWidth: 0 }}>
                         <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono }}>{new Date(s.date).toLocaleDateString('de-DE')}</span>
-                        <span style={{ fontSize: 11, color: C.text, fontFamily: fontMono, marginLeft: 8 }}>{s.workingSets[0]?.weight}kg × {s.workingSets[0]?.reps} @{s.workingSets[0]?.rpe}</span>
+                        <span style={{ fontSize: 11, color: C.text, fontFamily: fontMono, marginLeft: 8 }}>
+                          {s.workingSets.length > 1 ? `${s.workingSets.length} sets` : `${s.workingSets[0]?.weight}kg × ${s.workingSets[0]?.reps} @${s.workingSets[0]?.rpe}`}
+                        </span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono }}>{roundTo(s.computed.e1rm)}</span>
@@ -789,26 +835,42 @@ function HistoryTab({ store, update }) {
                     </div>
                     {isEditing && (
                       <div style={{ marginTop: 8, padding: 10, background: C.surfaceAlt, borderRadius: 8 }}>
-                        <Label>Edit RPE</Label>
-                        <div style={{ marginTop: 6 }}>
-                          <RpeSelect value={s.workingSets[0]?.rpe} onChange={(newRpe) => {
+                        {s.workingSets.map((ws, wi) => (
+                          <div key={wi} style={{ marginTop: wi > 0 ? 10 : 0, paddingTop: wi > 0 ? 10 : 0, borderTop: wi > 0 ? `1px solid ${C.border}` : 'none' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                              <span style={{ fontSize: 11, color: C.text, fontFamily: fontMono }}>{ws.weight}kg × {ws.reps}</span>
+                              <span style={{ fontSize: 10, color: C.textDim, fontFamily: fontMono }}>e1RM: {roundTo(calcE1RM(ws.weight, ws.reps, ws.rpe))}kg</span>
+                            </div>
+                            <RpeSelect value={ws.rpe} onChange={(newRpe) => {
+                              update(st => {
+                                const sess = st.sessions[globalIdx];
+                                sess.workingSets[wi].rpe = newRpe;
+                                const e1rms = sess.workingSets.map(x => calcE1RM(x.weight, x.reps, x.rpe));
+                                sess.computed.e1rm = Math.max(...e1rms);
+                                const recent = st.sessions.filter(x => x.lift === sess.lift && x.computed?.e1rm > 0).slice(-4);
+                                if (recent.length > 0) {
+                                  st.config.baselineE1RMs[sess.lift] = roundTo(recent.reduce((a,b) => a+b.computed.e1rm, 0) / recent.length);
+                                }
+                              });
+                            }} />
+                          </div>
+                        ))}
+                        <p style={{ fontSize: 9, color: C.textDim, fontFamily: fontMono, marginTop: 8 }}>Best e1RM: {roundTo(s.computed.e1rm)}kg</p>
+                        <button onClick={() => {
+                          if (confirm('Delete this session?')) {
                             update(st => {
                               const sess = st.sessions[globalIdx];
-                              sess.workingSets[0].rpe = newRpe;
-                              const w = sess.workingSets[0].weight;
-                              const r = sess.workingSets[0].reps;
-                              sess.computed.e1rm = calcE1RM(w, r, newRpe);
+                              const liftName = sess.lift;
+                              st.sessions.splice(globalIdx, 1);
                               // Recalculate baseline
-                              const recent = st.sessions.filter(x => x.lift === sess.lift && x.computed?.e1rm > 0).slice(-4);
+                              const recent = st.sessions.filter(x => x.lift === liftName && x.computed?.e1rm > 0).slice(-4);
                               if (recent.length > 0) {
-                                st.config.baselineE1RMs[sess.lift] = roundTo(recent.reduce((a,b) => a+b.computed.e1rm, 0) / recent.length);
+                                st.config.baselineE1RMs[liftName] = roundTo(recent.reduce((a,b) => a+b.computed.e1rm, 0) / recent.length);
                               }
                             });
-                          }} />
-                        </div>
-                        <p style={{ fontSize: 9, color: C.textDim, fontFamily: fontMono, marginTop: 6 }}>
-                          New e1RM: {roundTo(calcE1RM(s.workingSets[0]?.weight, s.workingSets[0]?.reps, s.workingSets[0]?.rpe))}kg
-                        </p>
+                            setEditingIdx(null);
+                          }
+                        }} style={{ width: '100%', marginTop: 8, padding: '8px 0', borderRadius: 6, border: `1px solid ${C.red}40`, background: C.redBg, color: C.red, fontFamily: fontMono, fontSize: 10, fontWeight: 600, cursor: 'pointer' }}>Delete Session</button>
                       </div>
                     )}
                   </div>
